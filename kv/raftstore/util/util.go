@@ -16,6 +16,20 @@ import (
 const RaftInvalidIndex uint64 = 0
 const InvalidID uint64 = 0
 
+func RaftReqToStr(req *raft_cmdpb.Request) string {
+	switch req.CmdType {
+	case raft_cmdpb.CmdType_Put:
+		return fmt.Sprintf("Put <%s : %s>", req.Put.Key, req.Put.Value)
+	case raft_cmdpb.CmdType_Get:
+		return fmt.Sprintf("Get <%s>", req.Get.Key)
+	case raft_cmdpb.CmdType_Delete:
+		return fmt.Sprintf("Delete <%s>", req.Delete.Key)
+	case raft_cmdpb.CmdType_Snap:
+		return string("Snap")
+	}
+	return string("Invalid Request")
+}
+
 /// `is_initial_msg` checks whether the `msg` can be used to initialize a new peer or not.
 // There could be two cases:
 // 1. Target peer already exists but has not established communication with leader yet

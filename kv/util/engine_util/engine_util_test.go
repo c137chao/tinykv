@@ -3,11 +3,56 @@ package engine_util
 import (
 	"bytes"
 	"io/ioutil"
+	"log"
 	"testing"
 
 	"github.com/Connor1996/badger"
 	"github.com/stretchr/testify/require"
 )
+
+func TestEngineBasic(t *testing.T) {
+	dir, _ := ioutil.TempDir("", "engine_util")
+	opts := badger.DefaultOptions
+	opts.Dir = dir
+	opts.ValueDir = dir
+	db, err := badger.Open(opts)
+	require.Nil(t, err)
+
+	batch := new(WriteBatch)
+	batch.SetCF(CfDefault, []byte("a"), []byte("a1"))
+	batch.SetCF(CfDefault, []byte("b"), []byte("b1"))
+	batch.SetCF(CfDefault, []byte("c"), []byte("c1"))
+	batch.SetCF(CfDefault, []byte("d"), []byte("d1"))
+	batch.SetCF(CfDefault, []byte("e"), []byte("e1"))
+	batch.DeleteCF(CfDefault, []byte("e"))
+	err = batch.WriteToDB(db)
+	require.Nil(t, err)
+
+	_, err = GetCF(db, CfDefault, []byte("e"))
+	require.Equal(t, err, badger.ErrKeyNotFound)
+
+	err = PutCF(db, CfDefault, []byte("e"), []byte("e2"))
+	require.Nil(t, err)
+	val, _ := GetCF(db, CfDefault, []byte("e"))
+	require.Equal(t, val, []byte("e2"))
+	err = DeleteCF(db, CfDefault, []byte("e"))
+	require.Nil(t, err)
+	_, err = GetCF(db, CfDefault, []byte("e"))
+	require.Equal(t, err, badger.ErrKeyNotFound)
+
+	PutCF(db, CfDefault, []byte("f"), []byte("f2"))
+	PutCF(db, CfDefault, []byte("a"), []byte("a2"))
+
+	txn := db.NewTransaction(false)
+	defer txn.Discard()
+	defaultIter := NewCFIterator(CfDefault, txn)
+	for defaultIter.Seek([]byte("a")); defaultIter.Valid(); defaultIter.Next() {
+		val, _ := defaultIter.Item().Value()
+		log.Printf("Item: %s, %s\n", defaultIter.Item().Key(), val)
+	}
+
+	defaultIter.Close()
+}
 
 func TestEngineUtil(t *testing.T) {
 	dir, err := ioutil.TempDir("", "engine_util")

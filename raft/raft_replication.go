@@ -2,6 +2,33 @@ package raft
 
 import pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 
+// append entries to local log and send to others
+func (r *Raft) proposeEntries(m pb.Message) {
+	// push all entries to my local log
+	for idx, ent := range m.Entries {
+		ent.Term = r.Term
+		ent.Index = r.RaftLog.LastIndex() + uint64(idx) + 1
+		r.printf(3, LOG2, "Propose ets %v at %v", *ent, r.RaftLog.LastIndex()+1)
+		r.RaftLog.entries = append(r.RaftLog.entries, *ent)
+	}
+
+	// update my match index and next index
+	r.Prs[r.id].Match = r.RaftLog.LastIndex()
+	r.Prs[r.id].Next = r.Prs[r.id].Match + 1
+
+	// if only one member in group, update commit index
+	if len(r.Prs) == 1 {
+		r.RaftLog.committed = r.RaftLog.LastIndex()
+	}
+
+	// send to all other raft node
+	for to := range r.Prs {
+		if to != r.id {
+			r.sendAppend(to)
+		}
+	}
+}
+
 // sendAppend sends an append RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
@@ -52,13 +79,14 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		prevLogTerm, err := r.RaftLog.Term(m.Index)
 		prevLogMatch := prevLogTerm == m.LogTerm
 
+		r.printf(3, LOG1, "handleAppendEntires prev<Idx:%v, Term %v> len %v", m.Index, prevLogTerm, len(m.Entries))
 		if err != nil {
 			// prevLogTerm will 0, prevLogMatch must be false
 			r.printf(1, ERRO, "Term %v err: %v", m.Index, err)
 		}
 
 		if prevLogMatch {
-			r.printf(2, APED, "Append Entry to RaftLog")
+			r.printf(2, APED, "Append %v Entry at %v", len(m.Entries), r.RaftLog.LastIndex()+1)
 			r.appendEntriesToLog(m.Entries)
 			if m.Commit > r.RaftLog.committed {
 				r.printf(1, CMIT, "advance commit from %v to %v", r.RaftLog.committed, m.Commit)
@@ -67,8 +95,6 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			response.Commit = r.RaftLog.committed
 			response.Index = m.Index + uint64(len(m.Entries))
 			response.Reject = false
-		} else {
-			r.printf(2, DROP, "Prev not match my Term(%d): %d", m.Index, prevLogTerm)
 		}
 	}
 
@@ -88,6 +114,7 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 	if m.Reject {
 		// TODO: log catchup
 		r.Prs[m.From].Next -= 1
+		r.printf(1, LOG1, "S%v reject me, reduce next to %v", m.From, r.Prs[m.From].Next)
 		r.sendAppend(m.From)
 
 		return
@@ -111,7 +138,7 @@ func (r *Raft) appendEntriesToLog(entries []*pb.Entry) {
 			matchTerm, _ := r.RaftLog.Term(entry.Index)
 			if entry.Term != matchTerm {
 				r.RaftLog.CutEndEntry(entry.Index)
-				r.printf(0, APED, "Conflict Entry at %v", entry.Index)
+				r.printf(1, APED, "Conflict Entry at %v", entry.Index)
 				if r.RaftLog.stabled >= entry.Index {
 					// TODO: maybe some problem
 					r.RaftLog.stabled = entry.Index - 1
@@ -134,11 +161,8 @@ func (r *Raft) tryAdvanceCommit(newcommit uint64) bool {
 	advance := len(agreeNode)+1 > len(r.Prs)/2
 
 	if advance {
-		r.printf(1, CMIT, "Advance Commit from %v to %v", r.RaftLog.committed, newcommit)
+		r.printf(1, CMIT, "advance commit from %v to %v", r.RaftLog.committed, newcommit)
 		r.RaftLog.committed = newcommit
-		// for _, to := range agreeNode {
-		// 	r.sendAppend(to)
-		// }
 		r.Step(pb.Message{MsgType: pb.MessageType_MsgPropose})
 	}
 

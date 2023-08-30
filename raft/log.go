@@ -67,17 +67,11 @@ func newLog(storage Storage) *RaftLog {
 		committed:       firstIndex - 1,
 		applied:         firstIndex - 1,
 		stabled:         lastIndex,
-		entries:         make([]pb.Entry, 1),
+		entries:         entries,
 		pendingSnapshot: nil,
-		firstIndex:      firstIndex - 1, //
+		firstIndex:      firstIndex,
 	}
 	// TODO: something else
-	snapshot, err := storage.Snapshot()
-	if err != nil {
-		log.entries[0] = pb.Entry{Term: snapshot.Metadata.Term, Index: snapshot.Metadata.Index}
-	}
-	// else default {0, 0}
-	log.entries = append(log.entries, entries...)
 
 	return log
 }
@@ -95,7 +89,7 @@ func (l *RaftLog) maybeCompact() {
 // note, this is one of the test stub functions you need to implement.
 func (l *RaftLog) allEntries() []pb.Entry {
 	// Your Code Here (2A).
-	return l.entries[1:]
+	return l.entries
 }
 
 func (l *RaftLog) getEntry(index uint64) *pb.Entry {
@@ -103,13 +97,14 @@ func (l *RaftLog) getEntry(index uint64) *pb.Entry {
 }
 
 func (l *RaftLog) CutEndEntry(end uint64) {
-	l.entries = l.entries[:end]
+	cutEnd := end - l.firstIndex
+	l.entries = l.entries[:cutEnd]
 }
 
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	return l.entries[l.stabled+1:]
+	return l.entries[l.stabled-l.firstIndex+1:]
 }
 
 // nextEnts returns all the committed but not applied entries
@@ -121,20 +116,22 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 }
 
 func (l *RaftLog) FirstIndex() uint64 {
-	return l.entries[0].Index
-
+	return l.firstIndex
 }
 
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	return l.entries[0].Index + uint64(len(l.entries)) - 1
+	return l.firstIndex + uint64(len(l.entries)) - 1
 }
 
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	if i < l.FirstIndex() || i > l.LastIndex() {
+	if i < l.FirstIndex() {
+		return l.storage.Term(i)
+	}
+	if i > l.LastIndex() {
 		return 0, ErrUnavailable
 	}
 	return l.entries[i-l.FirstIndex()].Term, nil

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"math/rand"
 
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -158,6 +159,11 @@ type Raft struct {
 	// value.
 	// (Used in 3A conf change)
 	PendingConfIndex uint64
+
+	// some other member add by Summer
+	ticks uint64 // for debug
+
+	// randElectionTimeout int
 }
 
 // newRaft return a raft peer with the given config
@@ -166,14 +172,13 @@ func newRaft(c *Config) *Raft {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
-	rflog := newLog(c.Storage)
 
-	hardstate, _, _ := rflog.storage.InitialState()
+	rflog := newLog(c.Storage)
 
 	r := Raft{
 		id:               c.ID,
-		Term:             hardstate.Term,
-		Vote:             hardstate.Vote,
+		Term:             0,
+		Vote:             None,
 		RaftLog:          rflog,
 		Prs:              make(map[uint64]*Progress),
 		State:            StateFollower,
@@ -181,42 +186,33 @@ func newRaft(c *Config) *Raft {
 		heartbeatTimeout: c.HeartbeatTick,
 		// other default 0 or nil
 	}
-	rflog.committed = hardstate.Commit
-	lastIndex := r.RaftLog.LastIndex()
 
-	for _, peer := range c.peers {
-		r.Prs[peer] = &Progress{lastIndex + 1, 0}
-	}
-	r.printf(1, TEST, "---------------New Raft with entries %v", r.RaftLog.allEntries())
+	peers := c.peers
 
-	return &r
-}
-
-// append entries to local log and send to others
-func (r *Raft) proposeEntries(m pb.Message) {
-	// push all entries to my local log
-	for idx, ent := range m.Entries {
-		ent.Term = r.Term
-		ent.Index = r.RaftLog.LastIndex() + uint64(idx) + 1
-		r.RaftLog.entries = append(r.RaftLog.entries, *ent)
-		r.printf(3, LEAD, "Propose append ets %v", *ent)
-	}
-
-	// update my match index and next index
-	r.Prs[r.id].Match = r.RaftLog.LastIndex()
-	r.Prs[r.id].Next = r.Prs[r.id].Match + 1
-
-	// if only one member in group, update commit index
-	if len(r.Prs) == 1 {
-		r.RaftLog.committed = r.RaftLog.LastIndex()
-	}
-
-	// send to all other raft node
-	for to := range r.Prs {
-		if to != r.id {
-			r.sendAppend(to)
+	hardstate, confstate, err := c.Storage.InitialState()
+	if err == nil {
+		// in raft, commit index and last applied are volatitle state
+		// but tinykv persist commit index,
+		rflog.committed = hardstate.Commit
+		r.Term = hardstate.Term
+		r.Vote = hardstate.Vote
+		if peers == nil {
+			peers = confstate.Nodes
 		}
 	}
+
+	// init nextIndex and matchIndex
+	lastIndex := r.RaftLog.LastIndex()
+
+	for _, peer := range peers {
+		r.Prs[peer] = &Progress{lastIndex + 1, 0}
+	}
+
+	r.electionElapsed = 0 - rand.Intn(r.electionTimeout)
+	log.Infof("[T%v] R%v: new raft witch entries[%v:%v], stabled:%v, commit:%v applied:%v", r.id, r.Term, r.RaftLog.stabled, r.RaftLog.committed, r.RaftLog.applied)
+	r.printf(1, TEST, "New Raft with elec timeout:%v, hb timeout:%v, entries %v", r.electionTimeout, r.heartbeatTimeout, r.RaftLog.allEntries())
+
+	return &r
 }
 
 // help for rawnode
@@ -238,10 +234,14 @@ func (r *Raft) hardState() pb.HardState {
 
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
+	r.ticks += 1
 	// Your Code Here (2A).
 	r.electionElapsed += 1
 	r.heartbeatElapsed += 1 // on;y keep for leader
 
+	// only non-leader can trigger election timeout
+	// it mean if one old leader offline and restore after
+	// the old leader will not break other nodes' work when old leader restore
 	if r.State != StateLeader && r.electionElapsed >= r.electionTimeout {
 		r.Step(pb.Message{MsgType: pb.MessageType_MsgHup})
 	}
@@ -286,9 +286,8 @@ func (r *Raft) becomeLeader() {
 		panic("becomeLeader Error")
 		// return // this case shouldn't occur
 	}
-	r.printf(1, LEAD, "Become Leader")
+	r.printf(1, LEAD, "Become leader: commit %v, apply %v, lastIndex %v", r.Term, r.id, r.RaftLog.committed, r.RaftLog.applied, r.RaftLog.LastIndex())
 	r.State = StateLeader
-	// r.electionElapsed = 0 - rand.Intn(r.electionTimeout)
 	r.heartbeatElapsed = 0
 
 	// init nextIndex and match Index
@@ -307,16 +306,16 @@ func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
 	switch r.State {
 	case StateFollower:
-		r.followerStep(m)
+		r.followerMsgHandle(m)
 	case StateCandidate:
-		r.candidateStep(m)
+		r.candidateMsgHandle(m)
 	case StateLeader:
-		r.leaderStep(m)
+		r.leaderMsgHandle(m)
 	}
 	return nil
 }
 
-func (r *Raft) followerStep(m pb.Message) error {
+func (r *Raft) followerMsgHandle(m pb.Message) error {
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
 		r.becomeCandidate()
@@ -337,7 +336,7 @@ func (r *Raft) followerStep(m pb.Message) error {
 	return nil
 }
 
-func (r *Raft) candidateStep(m pb.Message) error {
+func (r *Raft) candidateMsgHandle(m pb.Message) error {
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
 		r.becomeCandidate()
@@ -356,22 +355,19 @@ func (r *Raft) candidateStep(m pb.Message) error {
 		r.handleHeartbeat(m)
 
 	default:
-		return errors.New("candidate doesn't handle message")
+		return errors.New("follower doesn't handle message")
 	}
 	return nil
 }
 
-func (r *Raft) leaderStep(m pb.Message) error {
+func (r *Raft) leaderMsgHandle(m pb.Message) error {
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
-		// leader doesn't receive heartbeat reponse for a long time
-		// it will become candidate and start election
-		// r.becomeCandidate()
+		// ignore
 
-		// why leader ignore this msg ????
-		// how to check leader offline
 	case pb.MessageType_MsgBeat:
 		r.sendHeartbeatAll()
+
 	case pb.MessageType_MsgPropose:
 		r.proposeEntries(m)
 
@@ -383,6 +379,9 @@ func (r *Raft) leaderStep(m pb.Message) error {
 
 	case pb.MessageType_MsgRequestVote:
 		r.handlerRequestVote(m)
+
+	case pb.MessageType_MsgRequestVoteResponse:
+		// ignore it
 
 	case pb.MessageType_MsgSnapshot:
 		panic("Unimplement handler on MsgSnapshot")
@@ -400,88 +399,9 @@ func (r *Raft) leaderStep(m pb.Message) error {
 		panic("Unimplement handler on MsgTimeoutNo")
 
 	default:
-		return errors.New("leader doesn't handle message")
+		panic("undefined message!!!")
 	}
 	return nil
-}
-
-func (r *Raft) sendRequestVoteAll() {
-	if len(r.Prs) == 1 {
-		// only one node
-		r.becomeLeader()
-		return
-	}
-
-	lastLogTerm, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
-
-	msg := pb.Message{
-		MsgType: pb.MessageType_MsgRequestVote,
-		From:    r.id,
-		Term:    r.Term,
-		LogTerm: lastLogTerm,
-		Index:   r.RaftLog.LastIndex(),
-	}
-	for to := range r.Prs {
-		if to != r.id {
-			msg.To = to
-			r.msgs = append(r.msgs, msg)
-		}
-	}
-}
-
-func (r *Raft) handlerRequestVote(m pb.Message) {
-	if m.Term > r.Term {
-		r.becomeFollower(m.Term, None)
-	}
-	response := pb.Message{
-		MsgType: pb.MessageType_MsgRequestVoteResponse,
-		To:      m.From,
-		From:    r.id,
-		Term:    r.Term,
-		Reject:  true,
-	}
-
-	votefor := m.Term >= r.Term && (r.Vote == None || r.Vote == m.From)
-
-	lastTerm, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
-	up_to_date := m.LogTerm > lastTerm || (m.LogTerm == lastTerm && m.Index >= r.RaftLog.LastIndex())
-
-	if votefor && up_to_date {
-		// candidate or leader keep vote to itself
-		r.Vote = m.From
-		response.Reject = false
-		r.printf(2, VOTE, "vote for node %v", m.From)
-	}
-
-	r.msgs = append(r.msgs, response)
-}
-
-//
-func (r *Raft) handleRequestVoteResponse(m pb.Message) {
-	if m.Term > r.Term {
-		r.becomeFollower(m.Term, None)
-		return
-	}
-	r.votes[m.From] = !m.Reject
-	if len(r.votes) <= len(r.Prs)/2 {
-		return
-	}
-	agree := 0
-	rejec := 0
-
-	for _, granted := range r.votes {
-		if granted {
-			agree += 1
-		} else {
-			rejec += 1
-		}
-	}
-
-	if agree > len(r.Prs)/2 {
-		r.becomeLeader()
-	} else if rejec > len(r.Prs)/2 {
-		r.becomeFollower(r.Term, None)
-	}
 }
 
 //
@@ -516,6 +436,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 		r.becomeFollower(m.Term, m.From)
 	}
 
+	// commit used to help leader to decide whether send append entries to me
 	response := pb.Message{
 		MsgType: pb.MessageType_MsgHeartbeatResponse,
 		To:      m.From,

@@ -56,7 +56,7 @@ func (r *Raft) printf(level int, topic logTopic, format string, a ...interface{}
 	if debugVerbosity >= level {
 		time := time.Since(debugStart).Microseconds()
 		time /= 100
-		prefix := fmt.Sprintf("%06d %v S%v <T%v> ", time, string(topic), r.id, r.Term)
+		prefix := fmt.Sprintf("%06d %v R%v <T%v> tick %v ", time, string(topic), r.id, r.Term, r.ticks)
 		format = prefix + format + "\n"
 		log.Printf(format, a...)
 	}

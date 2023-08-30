@@ -6,10 +6,13 @@ import (
 
 	"github.com/Connor1996/badger/y"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/message"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/runner"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/snap"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
+	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/log"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 	rspb "github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
@@ -38,11 +41,108 @@ func newPeerMsgHandler(peer *peer, ctx *GlobalContext) *peerMsgHandler {
 	}
 }
 
+// check is there any data in raft need to persistence
 func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped {
 		return
 	}
 	// Your Code Here (2B).
+	if d.RaftGroup.HasReady() {
+		rd := d.RaftGroup.Ready()
+		defer d.RaftGroup.Advance(rd)
+
+		// sync command to other peer
+		d.Send(d.ctx.trans, rd.Messages)
+
+		// persist raft state and raft entries
+		result, err := d.peerStorage.SaveReadyState(&rd)
+		if result != nil || err != nil {
+			// err preocess releated
+			panic("HandleRaftReady: Unimplement applysnapshot")
+		}
+
+		if len(rd.CommittedEntries) != 0 {
+			for _, entry := range rd.CommittedEntries {
+				d.applyRequests(entry)
+			}
+		}
+	}
+}
+
+// apply request in entry to db storage
+func (d *peerMsgHandler) applyRequests(entry eraftpb.Entry) {
+	reqs := &raft_cmdpb.RaftCmdRequest{}
+	reqs.Unmarshal(entry.Data)
+
+	resps := &raft_cmdpb.RaftCmdResponse{
+		Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term(), Uuid: []byte(fmt.Sprintf("%v", d.PeerId()))},
+	}
+
+	kvdb := d.peerStorage.Engines.Kv
+	kvwb := engine_util.WriteBatch{}
+
+	for _, req := range reqs.Requests {
+		resp := raft_cmdpb.Response{CmdType: req.CmdType}
+
+		switch req.GetCmdType() {
+		case raft_cmdpb.CmdType_Invalid:
+			log.Errorf("Invalid Raft Command")
+			continue
+		case raft_cmdpb.CmdType_Get:
+			val, err := engine_util.GetCF(kvdb, req.Get.Cf, req.Get.Key)
+			if err != nil {
+				BindRespError(resps, &util.ErrKeyNotInRegion{Key: req.Get.Key, Region: d.Region()})
+			}
+
+			resp.Get = &raft_cmdpb.GetResponse{Value: val}
+
+		case raft_cmdpb.CmdType_Put:
+			// engine_util.PutCF(kvdb, req.Put.Cf, req.Put.Key, req.Put.Value)
+			kvwb.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
+			resp.Put = &raft_cmdpb.PutResponse{}
+
+		case raft_cmdpb.CmdType_Delete:
+			// engine_util.DeleteCF(kvdb, req.Delete.Cf, req.Delete.Key)
+			kvwb.DeleteCF(req.Delete.Cf, req.Delete.Key)
+			resp.Delete = &raft_cmdpb.DeleteResponse{}
+
+		case raft_cmdpb.CmdType_Snap:
+			resp.Snap = &raft_cmdpb.SnapResponse{Region: d.Region()}
+		}
+
+		log.Infof("[T%v] Peer %v Apply %v at Index %v", d.Term(), d.PeerId(), *req, entry.Index)
+		resps.Responses = append(resps.Responses, &resp)
+	}
+
+	if len(resps.Responses) == 0 {
+		return
+	}
+
+	// write back apply state and request
+	ps := d.peerStorage
+	ps.applyState.AppliedIndex = entry.Index
+	applykey := meta.ApplyStateKey(ps.region.GetId())
+	kvwb.SetMeta(applykey, ps.applyState)
+
+	d.peerStorage.Engines.WriteKV(&kvwb)
+
+	// skip all stale command, it may be caused by leader change (oldleader -> follower -> newleader) or log overwrite
+	for len(d.proposals) > 0 && (d.proposals[0].term < entry.Term || d.proposals[0].index < entry.Index) {
+		log.Warnf("[T%v] Peer %v Skip Stale Propose in T%v%v ", d.Term(), d.PeerId(), d.proposals[0].index, d.proposals[0].term)
+		d.proposals[0].cb.Done(ErrResp(&util.ErrStaleCommand{}))
+		d.proposals = d.proposals[1:]
+	}
+
+	// non-leader may be wake up client, it's ok
+	if len(d.proposals) > 0 && d.proposals[0].term == entry.Term && d.proposals[0].index == entry.Index {
+		log.Infof("[%v] Peer %v Wakeup Propose %v for %v resps: %v", d.Term(), d.PeerId(), d.proposals[0].index, len(resps.Responses), resps.Responses[0])
+		if d.proposals[0].cb.Txn == nil {
+			d.proposals[0].cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+		}
+
+		d.proposals[0].cb.Done(resps)
+		d.proposals = d.proposals[1:]
+	}
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -107,6 +207,7 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 	return err
 }
 
+//
 func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	err := d.preProposeRaftCommand(msg)
 	if err != nil {
@@ -114,6 +215,26 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	// Your Code Here (2B).
+	// now this peer must be leader
+
+	// TODO : msg.AdminRequest
+
+	proposal := &proposal{
+		index: d.nextProposalIndex(),
+		term:  d.Term(),
+		cb:    cb,
+	}
+	d.proposals = append(d.proposals, proposal)
+
+	for _, req := range msg.Requests {
+		log.Infof("Peer %v propose request %v with Index %v", d.PeerId(), *req, proposal.index)
+	}
+
+	raftcmd, err := msg.Marshal()
+	if err != nil {
+		log.Fatalf("propose raft cmd err: %v\n", err)
+	}
+	d.RaftGroup.Propose(raftcmd)
 }
 
 func (d *peerMsgHandler) onTick() {

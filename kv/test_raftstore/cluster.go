@@ -223,6 +223,9 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 		request.Header.Peer = leader
 		resp, txn := c.CallCommand(request, 1*time.Second)
 		if resp == nil {
+			if request.Requests[0].CmdType == raft_cmdpb.CmdType_Snap {
+				log.Warnf(" req %v to Peer %v", request.Requests[0], leader)
+			}
 			log.Debugf("can't call command %s on leader %d of region %d", request.String(), leader.GetId(), regionID)
 			newLeader := c.LeaderOfRegion(regionID)
 			if leader == newLeader {
@@ -310,7 +313,8 @@ func (c *Cluster) MustPutCF(cf string, key, value []byte) {
 		panic("len(resp.Responses) != 1")
 	}
 	if resp.Responses[0].CmdType != raft_cmdpb.CmdType_Put {
-		panic("resp.Responses[0].CmdType != raft_cmdpb.CmdType_Put")
+		log.Fatalf("Expect Put reponse, however %v", resp.Responses[0].CmdType)
+		// panic("resp.Responses[0].CmdType != raft_cmdpb.CmdType_Put")
 	}
 }
 
@@ -335,13 +339,16 @@ func (c *Cluster) GetCF(cf string, key []byte) []byte {
 		panic("len(resp.Responses) != 1")
 	}
 	if resp.Responses[0].CmdType != raft_cmdpb.CmdType_Get {
-		panic("resp.Responses[0].CmdType != raft_cmdpb.CmdType_Get")
+		log.Fatalf("Expect Get reponse, however %v", resp.Responses[0].CmdType)
+		// panic("resp.Responses[0].CmdType != raft_cmdpb.CmdType_Get")
 	}
 	return resp.Responses[0].Get.Value
 }
 
 func (c *Cluster) MustDelete(key []byte) {
+	// log.Warnf("Cluster Delete <%s>", key)
 	c.MustDeleteCF(engine_util.CfDefault, key)
+	// log.Warnf("Complete Delete <%s>", key)
 }
 
 func (c *Cluster) MustDeleteCF(cf string, key []byte) {
@@ -354,7 +361,8 @@ func (c *Cluster) MustDeleteCF(cf string, key []byte) {
 		panic("len(resp.Responses) != 1")
 	}
 	if resp.Responses[0].CmdType != raft_cmdpb.CmdType_Delete {
-		panic("resp.Responses[0].CmdType != raft_cmdpb.CmdType_Delete")
+		log.Fatalf("Expect Delete reponse, however %v", resp.Responses[0].CmdType)
+		// panic("resp.Responses[0].CmdType != raft_cmdpb.CmdType_Delete")
 	}
 }
 
@@ -371,9 +379,11 @@ func (c *Cluster) Scan(start, end []byte) [][]byte {
 			panic("len(resp.Responses) != 1")
 		}
 		if resp.Responses[0].CmdType != raft_cmdpb.CmdType_Snap {
-			panic("resp.Responses[0].CmdType != raft_cmdpb.CmdType_Snap")
+			log.Fatalf("Expect Snap reponse, however %v", resp.Responses[0].CmdType)
+			// panic("resp.Responses[0].CmdType != raft_cmdpb.CmdType_Snap")
 		}
 		region := resp.Responses[0].GetSnap().Region
+		// log.Warnf("Snap %s from Peer %s in Region %v", key, (resp.Header.Uuid), region.Id)
 		iter := raft_storage.NewRegionReader(txn, *region).IterCF(engine_util.CfDefault)
 		for iter.Seek(key); iter.Valid(); iter.Next() {
 			if engine_util.ExceedEndKey(iter.Item().Key(), end) {

@@ -35,6 +35,7 @@ func (s *StandAloneStorage) Start() error {
 
 func (s *StandAloneStorage) Stop() error {
 	// Your Code Here (1).
+	// return s.cf_storage.Close()
 	return nil
 }
 
