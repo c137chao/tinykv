@@ -57,6 +57,7 @@ func (c *Cluster) Start() {
 	ctx := context.TODO()
 	clusterID := c.schedulerClient.GetClusterID(ctx)
 
+	// create db engine of disk
 	for storeID := uint64(1); storeID <= uint64(c.count); storeID++ {
 		dbPath, err := ioutil.TempDir("", c.baseDir)
 		if err != nil {
@@ -223,9 +224,6 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 		request.Header.Peer = leader
 		resp, txn := c.CallCommand(request, 1*time.Second)
 		if resp == nil {
-			if request.Requests[0].CmdType == raft_cmdpb.CmdType_Snap {
-				log.Warnf(" req %v to Peer %v", request.Requests[0], leader)
-			}
 			log.Debugf("can't call command %s on leader %d of region %d", request.String(), leader.GetId(), regionID)
 			newLeader := c.LeaderOfRegion(regionID)
 			if leader == newLeader {
@@ -346,9 +344,7 @@ func (c *Cluster) GetCF(cf string, key []byte) []byte {
 }
 
 func (c *Cluster) MustDelete(key []byte) {
-	// log.Warnf("Cluster Delete <%s>", key)
 	c.MustDeleteCF(engine_util.CfDefault, key)
-	// log.Warnf("Complete Delete <%s>", key)
 }
 
 func (c *Cluster) MustDeleteCF(cf string, key []byte) {
@@ -383,7 +379,6 @@ func (c *Cluster) Scan(start, end []byte) [][]byte {
 			// panic("resp.Responses[0].CmdType != raft_cmdpb.CmdType_Snap")
 		}
 		region := resp.Responses[0].GetSnap().Region
-		// log.Warnf("Snap %s from Peer %s in Region %v", key, (resp.Header.Uuid), region.Id)
 		iter := raft_storage.NewRegionReader(txn, *region).IterCF(engine_util.CfDefault)
 		for iter.Seek(key); iter.Valid(); iter.Next() {
 			if engine_util.ExceedEndKey(iter.Item().Key(), end) {
@@ -422,9 +417,12 @@ func (c *Cluster) TransferLeader(regionID uint64, leader *metapb.Peer) {
 func (c *Cluster) MustTransferLeader(regionID uint64, leader *metapb.Peer) {
 	timer := time.Now()
 	for {
+
 		currentLeader := c.LeaderOfRegion(regionID)
+		log.Infof("transfer leader %v curLeader %v", leader.Id, currentLeader.Id)
 		if currentLeader.Id == leader.Id &&
 			currentLeader.StoreId == leader.StoreId {
+			log.Infof("must transfer leader %v succeess", leader.Id)
 			return
 		}
 		if time.Since(timer) > 5*time.Second {

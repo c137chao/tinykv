@@ -81,6 +81,13 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	storeFirstIdx, err := l.storage.FirstIndex()
+	if err != nil {
+		return
+	}
+	if l.firstIndex < storeFirstIdx {
+		l.CutStartEntry(storeFirstIdx)
+	}
 
 }
 
@@ -99,6 +106,15 @@ func (l *RaftLog) getEntry(index uint64) *pb.Entry {
 func (l *RaftLog) CutEndEntry(end uint64) {
 	cutEnd := end - l.firstIndex
 	l.entries = l.entries[:cutEnd]
+}
+
+func (l *RaftLog) CutStartEntry(start uint64) {
+	cutStart := start - l.firstIndex
+	newEntries := make([]pb.Entry, 0)
+
+	newEntries = append(newEntries, l.entries[cutStart:]...)
+	l.firstIndex = start
+	l.entries = newEntries
 }
 
 // unstableEntries return all the unstable entries

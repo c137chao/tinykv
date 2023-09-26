@@ -6,11 +6,9 @@ import (
 
 	"github.com/Connor1996/badger/y"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/message"
-	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/runner"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/snap"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
-	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
@@ -38,110 +36,6 @@ func newPeerMsgHandler(peer *peer, ctx *GlobalContext) *peerMsgHandler {
 	return &peerMsgHandler{
 		peer: peer,
 		ctx:  ctx,
-	}
-}
-
-// check is there any data in raft need to persistence
-func (d *peerMsgHandler) HandleRaftReady() {
-	if d.stopped {
-		return
-	}
-	// Your Code Here (2B).
-	if d.RaftGroup.HasReady() {
-		rd := d.RaftGroup.Ready()
-		defer d.RaftGroup.Advance(rd)
-
-		// sync command to other peer
-		d.Send(d.ctx.trans, rd.Messages)
-
-		// persist raft state and raft entries
-		result, err := d.peerStorage.SaveReadyState(&rd)
-		if result != nil || err != nil {
-			// err preocess releated
-			panic("HandleRaftReady: Unimplement applysnapshot")
-		}
-
-		if len(rd.CommittedEntries) != 0 {
-			for _, entry := range rd.CommittedEntries {
-				d.applyRequests(entry)
-			}
-		}
-	}
-}
-
-// apply request in entry to db storage
-func (d *peerMsgHandler) applyRequests(entry eraftpb.Entry) {
-	reqs := &raft_cmdpb.RaftCmdRequest{}
-	reqs.Unmarshal(entry.Data)
-
-	resps := &raft_cmdpb.RaftCmdResponse{
-		Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term(), Uuid: []byte(fmt.Sprintf("%v", d.PeerId()))},
-	}
-
-	kvdb := d.peerStorage.Engines.Kv
-	kvwb := engine_util.WriteBatch{}
-
-	for _, req := range reqs.Requests {
-		resp := raft_cmdpb.Response{CmdType: req.CmdType}
-
-		switch req.GetCmdType() {
-		case raft_cmdpb.CmdType_Invalid:
-			log.Errorf("Invalid Raft Command")
-			continue
-		case raft_cmdpb.CmdType_Get:
-			val, err := engine_util.GetCF(kvdb, req.Get.Cf, req.Get.Key)
-			if err != nil {
-				BindRespError(resps, &util.ErrKeyNotInRegion{Key: req.Get.Key, Region: d.Region()})
-			}
-
-			resp.Get = &raft_cmdpb.GetResponse{Value: val}
-
-		case raft_cmdpb.CmdType_Put:
-			// engine_util.PutCF(kvdb, req.Put.Cf, req.Put.Key, req.Put.Value)
-			kvwb.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
-			resp.Put = &raft_cmdpb.PutResponse{}
-
-		case raft_cmdpb.CmdType_Delete:
-			// engine_util.DeleteCF(kvdb, req.Delete.Cf, req.Delete.Key)
-			kvwb.DeleteCF(req.Delete.Cf, req.Delete.Key)
-			resp.Delete = &raft_cmdpb.DeleteResponse{}
-
-		case raft_cmdpb.CmdType_Snap:
-			resp.Snap = &raft_cmdpb.SnapResponse{Region: d.Region()}
-		}
-
-		log.Infof("[T%v] Peer %v Apply %v at Index %v", d.Term(), d.PeerId(), *req, entry.Index)
-		resps.Responses = append(resps.Responses, &resp)
-	}
-
-	if len(resps.Responses) == 0 {
-		return
-	}
-
-	// write back apply state and request
-	ps := d.peerStorage
-	ps.applyState.AppliedIndex = entry.Index
-	applykey := meta.ApplyStateKey(ps.region.GetId())
-	kvwb.SetMeta(applykey, ps.applyState)
-
-	d.peerStorage.Engines.WriteKV(&kvwb)
-
-	// skip all stale command, it may be caused by leader change (oldleader -> follower -> newleader) or log overwrite
-	for len(d.proposals) > 0 && (d.proposals[0].term < entry.Term || d.proposals[0].index < entry.Index) {
-		log.Warnf("[T%v] Peer %v Skip Stale Propose in T%v%v ", d.Term(), d.PeerId(), d.proposals[0].index, d.proposals[0].term)
-		d.proposals[0].cb.Done(ErrResp(&util.ErrStaleCommand{}))
-		d.proposals = d.proposals[1:]
-	}
-
-	// non-leader may be wake up client, it's ok
-	if len(d.proposals) > 0 && d.proposals[0].term == entry.Term && d.proposals[0].index == entry.Index {
-		log.Infof("[%v] Peer %v Wakeup Propose %v for %v resps: %v", d.Term(), d.PeerId(), d.proposals[0].index, len(resps.Responses), resps.Responses[0])
-		if d.proposals[0].cb.Txn == nil {
-			d.proposals[0].cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
-		}
-
-		d.proposals[0].cb.Done(resps)
-		d.proposals = d.proposals[1:]
 	}
 }
 
@@ -216,25 +110,81 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	}
 	// Your Code Here (2B).
 	// now this peer must be leader
+	if msg.AdminRequest != nil {
+		d.proposeAdminReq(msg, cb)
 
-	// TODO : msg.AdminRequest
+	} else {
+		proposal := &proposal{
+			index: d.nextProposalIndex(),
+			term:  d.Term(),
+			cb:    cb,
+		}
+		d.proposals = append(d.proposals, proposal)
 
-	proposal := &proposal{
-		index: d.nextProposalIndex(),
-		term:  d.Term(),
-		cb:    cb,
+		raftcmd, err := msg.Marshal()
+		if err != nil {
+			log.Fatalf("propose raft cmd err: %v\n", err)
+		}
+		d.RaftGroup.Propose(raftcmd)
+
 	}
-	d.proposals = append(d.proposals, proposal)
 
-	for _, req := range msg.Requests {
-		log.Infof("Peer %v propose request %v with Index %v", d.PeerId(), *req, proposal.index)
-	}
+}
 
-	raftcmd, err := msg.Marshal()
-	if err != nil {
-		log.Fatalf("propose raft cmd err: %v\n", err)
+func (d *peerMsgHandler) proposeAdminReq(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	admin := msg.AdminRequest
+
+	switch msg.AdminRequest.CmdType {
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		// just seen a normal raft msg
+		log.Infof("[T%v] Peer %v recv CompactLog at %v", d.Term(), d.PeerId(), admin.CompactLog.CompactIndex)
+		admincmd, err := msg.Marshal()
+		if err != nil {
+			log.Fatalf("marshal error")
+		}
+		d.RaftGroup.Propose(admincmd)
+
+	case raft_cmdpb.AdminCmdType_TransferLeader:
+		log.Infof("[T%v] Peer %v recv TransferLeader", d.Term(), d.PeerId())
+		d.RaftGroup.TransferLeader(admin.TransferLeader.Peer.Id)
+		resp := newCmdResp()
+		resp.AdminResponse = &raft_cmdpb.AdminResponse{
+			CmdType: raft_cmdpb.AdminCmdType_TransferLeader,
+		}
+		cb.Done(resp)
+
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+		if d.peerStorage.AppliedIndex() < d.RaftGroup.Raft.PendingConfIndex {
+			log.Warnf("last pendingConf doesn't applied")
+			return
+		}
+		proposal := &proposal{
+			index: d.nextProposalIndex(),
+			term:  d.Term(),
+			cb:    cb,
+		}
+		d.proposals = append(d.proposals, proposal)
+
+		log.Infof("Peer %v recv change peer %v, propose idx: %v", d.PeerId(), admin.ChangePeer, proposal.index)
+		ctx, err := msg.AdminRequest.ChangePeer.Marshal()
+		if err != nil {
+			panic("marshall error")
+		}
+		cc := eraftpb.ConfChange{
+			ChangeType: admin.ChangePeer.ChangeType,
+			NodeId:     admin.ChangePeer.Peer.Id,
+			Context:    ctx, // TODO: fill context
+		}
+		if err := d.RaftGroup.ProposeConfChange(cc); err != nil {
+			d.RaftGroup.Raft.PendingConfIndex = proposal.index
+		}
+
+	case raft_cmdpb.AdminCmdType_Split:
+		log.Fatalf("Peer %v request split %v", d.PeerId(), admin.Split)
+
+	default:
+		log.Fatalf("Unimplement adminRequest %v", msg.AdminRequest.CmdType)
 	}
-	d.RaftGroup.Propose(raftcmd)
 }
 
 func (d *peerMsgHandler) onTick() {
@@ -264,6 +214,7 @@ func (d *peerMsgHandler) startTicker() {
 	d.ticker.schedule(PeerTickRaftLogGC)
 	d.ticker.schedule(PeerTickSplitRegionCheck)
 	d.ticker.schedule(PeerTickSchedulerHeartbeat)
+	log.Warnf("%v storeId: %v, start ticker, version: %v", d.Tag, d.storeID(), d.Region().RegionEpoch)
 }
 
 func (d *peerMsgHandler) onRaftBaseTick() {
@@ -371,12 +322,16 @@ func (d *peerMsgHandler) checkMessage(msg *rspb.RaftMessage) bool {
 	// TODO: for case f, if 2 is stale for a long time, 2 will communicate with scheduler and scheduler will
 	// tell 2 is stale, so 2 can remove itself.
 	region := d.Region()
+	// log.Warnf("%v checkMsg from R%v region confver %v,from confver %v", d.Tag, msg.Message.From, fromEpoch.ConfVer, region.RegionEpoch.ConfVer)
+	// log.Warnf("%v stale: %v search storeId %v in %v", d.Tag, util.IsEpochStale(fromEpoch, region.RegionEpoch), fromStoreID, d.Region().Peers)
+
 	if util.IsEpochStale(fromEpoch, region.RegionEpoch) && util.FindPeer(region, fromStoreID) == nil {
 		// The message is stale and not in current region.
 		handleStaleMsg(d.ctx.trans, msg, region.RegionEpoch, isVoteMsg)
 		return true
 	}
 	target := msg.GetToPeer()
+	// log.Warnf("%v Target Id %v, my peerId %v", d.Tag, target.Id, d.PeerId())
 	if target.Id < d.PeerId() {
 		log.Infof("%s target peer ID %d is less than %d, msg maybe stale", d.Tag, target.Id, d.PeerId())
 		return true
@@ -548,7 +503,6 @@ func (d *peerMsgHandler) onRaftGCLogTick() {
 
 	term, err := d.RaftGroup.Raft.RaftLog.Term(compactIdx)
 	if err != nil {
-		log.Fatalf("appliedIdx: %d, firstIdx: %d, compactIdx: %d", appliedIdx, firstIdx, compactIdx)
 		panic(err)
 	}
 

@@ -1,13 +1,11 @@
 package raft
 
 import (
-	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
 // send request vote to all peers
 func (r *Raft) sendRequestVoteAll() {
-	r.printf(2, TIMR, "Start Compaign\n")
 	if len(r.Prs) == 1 {
 		// only one node
 		r.becomeLeader()
@@ -50,15 +48,13 @@ func (r *Raft) handlerRequestVote(m pb.Message) {
 
 	lastTerm, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
 
-	canVoteFor := m.Term >= r.Term && (r.Vote == None || r.Vote == m.From)
+	canVoteFor := m.Term >= r.Term && (r.Vote == None || r.Vote == m.From) && r.Lead == None
 	up_to_date := m.LogTerm > lastTerm || (m.LogTerm == lastTerm && m.Index >= r.RaftLog.LastIndex())
 
 	if canVoteFor && up_to_date {
 		// candidate or leader keep vote to itself
 		r.Vote = m.From
 		response.Reject = false
-		r.printf(2, VOTE, "vote for node %v", m.From)
-		log.Infof("[T%v] R%v vote for node %v", r.Term, r.id, m.From)
 	}
 
 	r.msgs = append(r.msgs, response)

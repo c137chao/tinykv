@@ -296,6 +296,10 @@ func (m *MockSchedulerClient) RegionHeartbeat(req *schedulerpb.RegionHeartbeatRe
 	return nil
 }
 
+// handleHeartbeatVersion
+//	search region in mock scheduler clienti
+//  if serrch region version < region version, remove old region and add new
+//	if region range change, add new region or split region
 func (m *MockSchedulerClient) handleHeartbeatVersion(region *metapb.Region) error {
 	if engine_util.ExceedEndKey(region.GetStartKey(), region.GetEndKey()) {
 		panic("start key > end key")
@@ -337,6 +341,9 @@ func (m *MockSchedulerClient) handleHeartbeatVersion(region *metapb.Region) erro
 	}
 }
 
+//
+//
+//
 func (m *MockSchedulerClient) handleHeartbeatConfVersion(region *metapb.Region) error {
 	searchRegion, _ := m.getRegionLocked(region.GetStartKey())
 	if util.IsEpochStale(region.RegionEpoch, searchRegion.RegionEpoch) {
@@ -539,6 +546,7 @@ func (m *MockSchedulerClient) scheduleOperator(regionID uint64, op *Operator) {
 // Utilities
 func MustSamePeers(left *metapb.Region, right *metapb.Region) {
 	if len(left.GetPeers()) != len(right.GetPeers()) {
+		log.Errorf("actual peer: %v, expect peer: %v", left.GetPeers(), right.GetPeers())
 		panic("unmatched peers length")
 	}
 	for _, p := range left.GetPeers() {

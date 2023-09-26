@@ -17,6 +17,7 @@ package raft
 import (
 	"errors"
 
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -101,10 +102,26 @@ func (rn *RawNode) Campaign() error {
 // Propose proposes data be appended to the raft log.
 func (rn *RawNode) Propose(data []byte) error {
 	ent := pb.Entry{Data: data}
+	log.Infof("%v propose %s", rn.Raft.id, data)
 	return rn.Raft.Step(pb.Message{
 		MsgType: pb.MessageType_MsgPropose,
 		From:    rn.Raft.id,
 		Entries: []*pb.Entry{&ent}})
+}
+
+func (rn *RawNode) SnapShot(index, term uint64) error {
+	snap := pb.Snapshot{
+		Metadata: &pb.SnapshotMetadata{Index: index, Term: term},
+	}
+	msg := pb.Message{
+		MsgType:  pb.MessageType_MsgSnapshot,
+		From:     rn.Raft.id,
+		To:       rn.Raft.id,
+		Snapshot: &snap,
+		// Snapshot: ,
+	}
+
+	return rn.Raft.Step(msg)
 }
 
 // ProposeConfChange proposes a config change.
@@ -152,13 +169,17 @@ func (rn *RawNode) Step(m pb.Message) error {
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
 	r := Ready{
-		SoftState:        nil, // un-used now
+		SoftState:        nil,
 		HardState:        pb.HardState{},
 		Entries:          rn.Raft.RaftLog.unstableEntries(),
 		Snapshot:         pb.Snapshot{},
 		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
 		Messages:         rn.Raft.msgs,
 	}
+	if rn.lastSoft != *rn.Raft.softstate() {
+		r.SoftState = rn.Raft.softstate()
+	}
+
 	if !isHardStateEqual(rn.lastHard, rn.Raft.hardState()) {
 		r.HardState = rn.Raft.hardState()
 	}

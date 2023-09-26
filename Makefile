@@ -42,6 +42,9 @@ kv:
 scheduler:
 	$(GOBUILD) -o bin/tinyscheduler-server scheduler/main.go
 
+clean:
+	$(TEST_CLEAN)
+
 ci: default
 	@echo "Checking formatting"
 	@test -z "$$(gofmt -s -l $$(find . -name '*.go' -type f -print) | tee /dev/stderr)"

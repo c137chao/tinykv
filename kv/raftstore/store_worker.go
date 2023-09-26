@@ -225,6 +225,7 @@ func (d *storeWorker) maybeCreatePeer(regionID uint64, msg *rspb.RaftMessage) (b
 	// following snapshot may overlap, should insert into regionRanges after
 	// snapshot is applied.
 	meta.regions[regionID] = peer.Region()
+	d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: peer.Region()})
 	d.ctx.router.register(peer)
 	_ = d.ctx.router.send(regionID, message.Msg{Type: message.MsgTypeStart})
 	return true, nil
@@ -284,6 +285,7 @@ func (d *storeWorker) handleSnapMgrGC() error {
 
 func (d *storeWorker) scheduleGCSnap(regionID uint64, keys []snap.SnapKeyWithSending) error {
 	gcSnap := message.Msg{Type: message.MsgTypeGcSnap, Data: &message.MsgGCSnap{Snaps: keys}}
+	log.Infof("region %d send GCSnap on %v", regionID, keys)
 	if d.ctx.router.send(regionID, gcSnap) != nil {
 		// The snapshot exists because MsgAppend has been rejected. So the
 		// peer must have been exist. But now it's disconnected, so the peer

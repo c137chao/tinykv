@@ -178,6 +178,7 @@ func doSnapshot(engines *engine_util.Engines, mgr *snap.SnapManager, regionId ui
 	regionState := new(rspb.RegionLocalState)
 	err = engine_util.GetMetaFromTxn(txn, meta.RegionStateKey(regionId), regionState)
 	if err != nil {
+		log.Errorf("DoSnapShot key is %v, err: %v", meta.RegionStateKey(regionId), err)
 		panic(err)
 	}
 	if regionState.GetState() != rspb.PeerState_Normal {
