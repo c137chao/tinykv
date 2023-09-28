@@ -104,8 +104,8 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 }
 
 func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
-	log.Infof("[T%v] %v:R%v recv appendResp From %v at %v",
-		r.Term, r.State, r.id, m.From, m.Index)
+	// log.Infof("[T%v] %v:R%v recv appendResp From %v at %v",
+	// 	r.Term, r.State, r.id, m.From, m.Index)
 
 	if m.Term > r.Term {
 		r.becomeFollower(m.Term, None)
@@ -115,10 +115,14 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 		return
 	}
 
+	// TO FIX: un-order msg maybe cause a bug:
+	// leader request snapshot but it recv reject msg before in same term
 	if m.Reject {
 		// TODO: log catchup
-		r.Prs[m.From].Next -= 1
-		r.sendAppend(m.From)
+		if r.Prs[m.From].Next >= r.RaftLog.FirstIndex()-1 {
+			r.Prs[m.From].Next -= 1
+			r.sendAppend(m.From)
+		}
 
 		return
 	}

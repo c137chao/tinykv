@@ -126,7 +126,6 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 			log.Fatalf("propose raft cmd err: %v\n", err)
 		}
 		d.RaftGroup.Propose(raftcmd)
-
 	}
 
 }
@@ -165,7 +164,7 @@ func (d *peerMsgHandler) proposeAdminReq(msg *raft_cmdpb.RaftCmdRequest, cb *mes
 		}
 		d.proposals = append(d.proposals, proposal)
 
-		log.Infof("Peer %v recv change peer %v, propose idx: %v", d.PeerId(), admin.ChangePeer, proposal.index)
+		log.Warnf("Peer %v recv change peer %v, propose idx: %v", d.PeerId(), admin.ChangePeer, proposal.index)
 		ctx, err := msg.AdminRequest.ChangePeer.Marshal()
 		if err != nil {
 			panic("marshall error")
@@ -214,7 +213,6 @@ func (d *peerMsgHandler) startTicker() {
 	d.ticker.schedule(PeerTickRaftLogGC)
 	d.ticker.schedule(PeerTickSplitRegionCheck)
 	d.ticker.schedule(PeerTickSchedulerHeartbeat)
-	log.Warnf("%v storeId: %v, start ticker, version: %v", d.Tag, d.storeID(), d.Region().RegionEpoch)
 }
 
 func (d *peerMsgHandler) onRaftBaseTick() {
@@ -354,8 +352,8 @@ func handleStaleMsg(trans Transport, msg *rspb.RaftMessage, curEpoch *metapb.Reg
 	msgType := msg.Message.GetMsgType()
 
 	if !needGC {
-		log.Infof("[region %d] raft message %s is stale, current %v ignore it",
-			regionID, msgType, curEpoch)
+		log.Infof("[region %d] raft message %s from %v is stale, current %v ignore it",
+			regionID, msgType, msg.FromPeer, curEpoch)
 		return
 	}
 	gcMsg := &rspb.RaftMessage{

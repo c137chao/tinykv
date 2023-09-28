@@ -487,6 +487,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 		From:    r.id,
 		Term:    r.Term,
 		Commit:  r.RaftLog.committed,
+		Index:   r.RaftLog.LastIndex(),
 	}
 
 	r.msgs = append(r.msgs, response)
@@ -497,7 +498,7 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 		r.becomeFollower(m.Term, None)
 		return
 	}
-	if r.RaftLog.committed > m.Commit {
+	if r.RaftLog.committed > m.Commit || r.RaftLog.LastIndex() > m.Index {
 		r.sendAppend(m.From)
 	}
 }
@@ -517,7 +518,8 @@ func (r *Raft) addNode(id uint64) {
 		Match: 0,
 		Next:  r.RaftLog.FirstIndex(),
 	}
-	log.Infof("[%v] %v:R%v add Peer %v: %v", r.Term, r.State, r.id, id, r.Prs[id])
+	log.Infof("[%v] %v:R%v first: %v, last: %v", r.Term, r.State, r.id, r.RaftLog.FirstIndex(), r.RaftLog.LastIndex())
+	log.Warnf("[%v] %v:R%v add Peer %v: %v", r.Term, r.State, r.id, id, r.Prs[id])
 
 }
 

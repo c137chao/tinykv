@@ -9,7 +9,7 @@ import (
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
 	// lastIncludeIndex := max(m.Snapshot.Metadata.Index, m.Index-1)
-	lastIncludeIndex := m.Index
+	lastIncludeIndex := m.Snapshot.Metadata.Index
 	lastIncludeTerm := m.Snapshot.Metadata.Term
 
 	// filter stale message
@@ -81,7 +81,7 @@ func (r *Raft) sendSnapShotTo(to uint64) bool {
 		snapshot = *r.RaftLog.pendingSnapshot
 	} else {
 		snapshot, err = r.RaftLog.storage.Snapshot()
-		r.snapTicks = 5
+		r.snapTicks = 2
 	}
 
 	if err != nil {
@@ -99,7 +99,6 @@ func (r *Raft) sendSnapShotTo(to uint64) bool {
 		Term:     r.Term,
 		Snapshot: &snapshot,
 		Commit:   r.RaftLog.committed,
-		Index:    r.RaftLog.applied,
 	}
 
 	r.msgs = append(r.msgs, snapMsg)

@@ -123,7 +123,7 @@ func (d *peerMsgHandler) applyCompactLog(entry *eraftpb.Entry, compLog *raft_cmd
 	// becareful, don't set apply index to last include index, even it won't cause fault
 	d.peerStorage.applyState.AppliedIndex = entry.Index
 
-	log.Warnf("Peer %v Compact Log at index %v, entries first idx %v", d.PeerId(), lastIncludeIndex, d.RaftGroup.Raft.RaftLog.FirstIndex())
+	// log.Infof("Peer %v Compact Log at index %v, entries first idx %v", d.PeerId(), lastIncludeIndex, d.RaftGroup.Raft.RaftLog.FirstIndex())
 
 	// it's safe for follower
 	// if one follower apply this request, it means all before entry has been applied
@@ -181,7 +181,7 @@ func (d *peerMsgHandler) applyChangePeers(entry *eraftpb.Entry) {
 
 	}
 
-	log.Warnf("%v apply confChange:%v my confVersion:%v", d.Tag, changePeers, d.Region().RegionEpoch.ConfVer)
+	log.Infof("%v [APPLY] confChange:%v confV:%v, peers %v", d.Tag, changePeers, d.Region().RegionEpoch.ConfVer, d.Region().GetPeers())
 	d.CallBackPropose(entry, resp)
 
 	if d.IsLeader() {
@@ -215,7 +215,6 @@ func (d *peerMsgHandler) applyRequests(entry *eraftpb.Entry, reqs *raft_cmdpb.Ra
 
 	for _, req := range reqs.Requests {
 		if d.stopped {
-			log.Infof("[T%v] Peer %v stopped when apply req %v", d.Term(), d.PeerId(), *req)
 			return
 		}
 
@@ -247,7 +246,7 @@ func (d *peerMsgHandler) applyRequests(entry *eraftpb.Entry, reqs *raft_cmdpb.Ra
 			panic("Invalid Raft Command")
 		}
 
-		log.Infof("[T%v] Peer %v apply %v at index %v", d.Term(), d.PeerId(), *req, entry.Index)
+		// log.Infof("[T%v] Peer %v apply %v at index %v", d.Term(), d.PeerId(), *req, entry.Index)
 		resps.Responses = append(resps.Responses, &resp)
 		kvWB.MustWriteToDB(d.peerStorage.Engines.Kv)
 	}
