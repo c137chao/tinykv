@@ -1,6 +1,8 @@
 package raft
 
 import (
+	"sort"
+
 	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -8,9 +10,12 @@ import (
 // append entries to local log and send to others
 func (r *Raft) proposeEntries(m pb.Message) {
 	// pusunexpected raft log index all entries to my local log
-	for idx, ent := range m.Entries {
+	if r.leadTransferee != None {
+		return
+	}
+	for _, ent := range m.Entries {
 		ent.Term = r.Term
-		ent.Index = r.RaftLog.LastIndex() + uint64(idx) + 1
+		ent.Index = r.RaftLog.LastIndex() + 1
 		r.RaftLog.entries = append(r.RaftLog.entries, *ent)
 	}
 
@@ -21,6 +26,7 @@ func (r *Raft) proposeEntries(m pb.Message) {
 	// if only one member in group, update commit index
 	if len(r.Prs) == 1 {
 		r.RaftLog.committed = r.RaftLog.LastIndex()
+		return
 	}
 
 	// send to all other raft node
@@ -35,13 +41,12 @@ func (r *Raft) proposeEntries(m pb.Message) {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
-	ets := make([]*pb.Entry, 0)
-	prevLogIndex := r.Prs[to].Next - 1
-
-	if prevLogIndex < r.RaftLog.FirstIndex()-1 {
+	if r.Prs[to].Next-1 < r.RaftLog.FirstIndex()-1 {
 		return r.sendSnapShotTo(to)
 	}
 
+	ets := make([]*pb.Entry, 0)
+	prevLogIndex := r.Prs[to].Next - 1
 	prevLogTerm, _ := r.RaftLog.Term(prevLogIndex)
 
 	// next may be great than lastIndex
@@ -85,7 +90,9 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		prevLogTerm, _ := r.RaftLog.Term(m.Index)
 		prevLogMatch := prevLogTerm == m.LogTerm
 
-		response.Index = r.RaftLog.LastIndex()
+		// it is used for leader check is this response stale
+		//
+		response.Index = m.Index
 
 		if prevLogMatch {
 			r.appendEntriesToLog(m.Entries)
@@ -107,10 +114,12 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 	// log.Infof("[T%v] %v:R%v recv appendResp From %v at %v",
 	// 	r.Term, r.State, r.id, m.From, m.Index)
 
+	// leader is stale
 	if m.Term > r.Term {
 		r.becomeFollower(m.Term, None)
 		return
 	}
+	// stale message
 	if m.Term < r.Term || r.Prs[m.From].Match > m.Index {
 		return
 	}
@@ -119,7 +128,7 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 	// leader request snapshot but it recv reject msg before in same term
 	if m.Reject {
 		// TODO: log catchup
-		if r.Prs[m.From].Next >= r.RaftLog.FirstIndex()-1 {
+		if r.Prs[m.From].Next == m.Index+1 {
 			r.Prs[m.From].Next -= 1
 			r.sendAppend(m.From)
 		}
@@ -130,19 +139,19 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 	r.Prs[m.From].Next = m.Index + 1
 	r.Prs[m.From].Match = m.Index
 
-	if m.From == r.leadTransferee {
-		r.leadTransferee = None
-		r.Step(pb.Message{
-			MsgType: pb.MessageType_MsgTransferLeader,
-			From:    m.From,
-			To:      r.id,
-		})
+	if m.From == r.leadTransferee && m.Index == r.RaftLog.LastIndex() {
+		msg := pb.Message{
+			From:    r.id,
+			To:      r.leadTransferee,
+			MsgType: pb.MessageType_MsgTimeoutNow,
+		}
+		r.msgs = append(r.msgs, msg)
 		return
 	}
 
 	term, _ := r.RaftLog.Term(m.Index)
 	if term == r.Term && m.Index > r.RaftLog.committed {
-		r.tryAdvanceCommit(m.Index)
+		r.maybeCommit()
 	}
 }
 
@@ -151,10 +160,8 @@ func (r *Raft) appendEntriesToLog(entries []*pb.Entry) {
 		if entry.Index > r.RaftLog.LastIndex() {
 			r.RaftLog.entries = append(r.RaftLog.entries, *entry)
 		} else {
-			matchTerm, err := r.RaftLog.Term(entry.Index)
-			if err != nil {
-				log.Error(err)
-			} else if entry.Term != matchTerm {
+			matchTerm, _ := r.RaftLog.Term(entry.Index)
+			if entry.Term != matchTerm {
 				log.Warnf("[T%v] R%v Conflict Entry at %v and my first index is %v", r.Term, r.id, entry.Index, r.RaftLog.FirstIndex())
 				r.RaftLog.CutEndEntry(entry.Index)
 				if r.RaftLog.stabled >= entry.Index {
@@ -168,21 +175,18 @@ func (r *Raft) appendEntriesToLog(entries []*pb.Entry) {
 	}
 }
 
-func (r *Raft) tryAdvanceCommit(newcommit uint64) bool {
-	agreeCnt := 0
+// raft group usually have 3 or 5 node
+// sort doesn't cost much time
+func (r *Raft) maybeCommit() {
+	matchIdx := make(uint64Slice, 0)
 	for _, pr := range r.Prs {
-		if pr.Match >= newcommit {
-			agreeCnt += 1
-		}
+		matchIdx = append(matchIdx, pr.Match)
 	}
+	sort.Sort(matchIdx)
+	commitIndex := matchIdx[(len(matchIdx)-1)/2]
 
-	advance := agreeCnt > len(r.Prs)/2
-
-	if advance {
-		r.printf(1, CMIT, "advance commit from %v to %v", r.RaftLog.committed, newcommit)
-		r.RaftLog.committed = newcommit
+	if commitIndex > r.RaftLog.committed {
+		r.RaftLog.committed = commitIndex
 		r.Step(pb.Message{MsgType: pb.MessageType_MsgPropose})
 	}
-
-	return advance
 }

@@ -17,7 +17,6 @@ package raft
 import (
 	"errors"
 	"math/rand"
-	"sort"
 
 	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
@@ -303,10 +302,14 @@ func (r *Raft) becomeLeader() {
 		return
 	}
 
-	log.Infof("[T%v] R%v Become leader: commit %v, apply %v, lastIndex %v", r.Term, r.id, r.RaftLog.committed, r.RaftLog.applied, r.RaftLog.LastIndex())
 	r.Lead = r.id
 	r.State = StateLeader
 	r.heartbeatElapsed = 0
+	r.leadTransferee = None
+	r.PendingConfIndex = None
+
+	log.Infof("[T%v] R%v Become leader: commit %v, apply %v, lastIndex %v, pendingIndex %v",
+		r.Term, r.id, r.RaftLog.committed, r.RaftLog.applied, r.RaftLog.LastIndex(), r.PendingConfIndex)
 
 	// init nextIndex and match Index
 	initNextIndex := r.RaftLog.LastIndex() + 1
@@ -325,10 +328,13 @@ func (r *Raft) Step(m pb.Message) error {
 	switch r.State {
 	case StateFollower:
 		r.followerMsgHandle(m)
+
 	case StateCandidate:
 		r.candidateMsgHandle(m)
+
 	case StateLeader:
 		r.leaderMsgHandle(m)
+
 	}
 	return nil
 }
@@ -336,10 +342,7 @@ func (r *Raft) Step(m pb.Message) error {
 func (r *Raft) followerMsgHandle(m pb.Message) error {
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
-		if _, ok := r.Prs[r.id]; ok {
-			r.becomeCandidate()
-			r.sendRequestVoteAll()
-		}
+		r.handleMsgHup()
 
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
@@ -362,9 +365,8 @@ func (r *Raft) followerMsgHandle(m pb.Message) error {
 			m.To = r.Lead
 			r.msgs = append(r.msgs, m)
 		}
-
 	default:
-		return errors.New("follower doesn't handle message")
+		// ignore
 	}
 	return nil
 }
@@ -372,10 +374,8 @@ func (r *Raft) followerMsgHandle(m pb.Message) error {
 func (r *Raft) candidateMsgHandle(m pb.Message) error {
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
-		if _, ok := r.Prs[r.id]; ok {
-			r.becomeCandidate()
-			r.sendRequestVoteAll()
-		}
+		r.handleMsgHup()
+
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
 
@@ -392,11 +392,7 @@ func (r *Raft) candidateMsgHandle(m pb.Message) error {
 		r.handleTimeoutNow()
 
 	case pb.MessageType_MsgTransferLeader:
-		if _, ok := r.Prs[r.id]; ok {
-			log.Infof("[T%v] %v:R%v trans LeadTrans to %v", r.Term, r.State, r.id, r.Lead)
-			m.To = r.Lead
-			r.msgs = append(r.msgs, m)
-		}
+		r.transferMsgToLead(m)
 
 	default:
 		return errors.New("follower doesn't handle message")
@@ -437,7 +433,7 @@ func (r *Raft) leaderMsgHandle(m pb.Message) error {
 		r.handleHeartbeatResponse(m)
 
 	case pb.MessageType_MsgTransferLeader:
-		r.handleTransfer(m)
+		r.handleLeadTransfer(m)
 
 	case pb.MessageType_MsgTimeoutNow:
 		r.handleTimeoutNow()
@@ -448,7 +444,15 @@ func (r *Raft) leaderMsgHandle(m pb.Message) error {
 	return nil
 }
 
-//
+func (r *Raft) transferMsgToLead(m pb.Message) {
+	if _, ok := r.Prs[r.id]; ok {
+		// log.Infof("[T%v] %v:R%v trans LeadTrans to %v", r.Term, r.State, r.id, r.Lead)
+		m.To = r.Lead
+		r.msgs = append(r.msgs, m)
+	}
+}
+
+// sendHearts sends a heartbeat to all peers
 func (r *Raft) sendHeartbeatAll() {
 	for peer_id := range r.Prs {
 		if peer_id != r.id {
@@ -494,10 +498,15 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 }
 
 func (r *Raft) handleHeartbeatResponse(m pb.Message) {
+	// current leader is a stale leader
 	if r.Term < m.Term {
 		r.becomeFollower(m.Term, None)
 		return
 	}
+	// if m.Commit > r.Prs[m.From].Match {
+	// 	r.Prs[m.From].Match = m.Commit
+	// }
+	// need send some entres to follower
 	if r.RaftLog.committed > m.Commit || r.RaftLog.LastIndex() > m.Index {
 		r.sendAppend(m.From)
 	}
@@ -514,22 +523,23 @@ func (r *Raft) addNode(id uint64) {
 		return
 	}
 
+	// snapshot should send to new peer
+	// so next index set first index not last index
 	r.Prs[id] = &Progress{
 		Match: 0,
 		Next:  r.RaftLog.FirstIndex(),
 	}
-	log.Infof("[%v] %v:R%v first: %v, last: %v", r.Term, r.State, r.id, r.RaftLog.FirstIndex(), r.RaftLog.LastIndex())
-	log.Warnf("[%v] %v:R%v add Peer %v: %v", r.Term, r.State, r.id, id, r.Prs[id])
 
+	log.Warnf("[%v] %v:R%v add Peer %v: %v", r.Term, r.State, r.id, id, r.Prs[id])
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	// skip if id doesn't exist
 	if _, ok := r.Prs[id]; !ok {
 		return
 	}
-
 	log.Infof("[%v] %v:R%v remove Peer %v", r.Term, r.State, r.id, id)
 
 	delete(r.Prs, id)
@@ -537,47 +547,35 @@ func (r *Raft) removeNode(id uint64) {
 
 	// try to update commit index
 	if id != r.id && r.State == StateLeader && r.RaftLog.committed != r.RaftLog.LastIndex() {
-		matchIdx := make(uint64Slice, len(r.Prs))
-		for _, pr := range r.Prs {
-			matchIdx = append(matchIdx, pr.Match)
-		}
-		sort.Sort(matchIdx)
-		if matchIdx[len(matchIdx)/2] > r.RaftLog.committed {
-			r.RaftLog.committed = matchIdx[len(matchIdx)/2]
-			for i := range r.Prs {
-				if i != r.id {
-					r.sendAppend(i)
-				}
-			}
-		}
+		r.maybeCommit()
 	}
 }
 
+// become candiate and start election right now
 func (r *Raft) handleTimeoutNow() {
-	if _, ok := r.Prs[r.id]; !ok {
-		return
-	}
 	log.Infof("[T%v] %v:R%v recv MsgTimeOut", r.Term, r.State, r.id)
-
-	r.becomeCandidate()
-	r.sendRequestVoteAll()
+	r.Step(pb.Message{MsgType: pb.MessageType_MsgHup})
 }
 
-func (r *Raft) handleTransfer(m pb.Message) {
+//
+func (r *Raft) handleLeadTransfer(m pb.Message) {
+	// if raft will destroy or transfer target doesn't in prs, skip
 	if _, ok := r.Prs[r.id]; !ok {
 		return
 	}
+	if _, ok := r.Prs[m.From]; !ok {
+		return
+	}
+	leadTransferee := m.From
 
 	log.Infof("[T%v] %v:R%v transfer leader to %v", r.Term, r.State, r.id, m.From)
 
-	leadTransferee := m.From
-	lastleadtransferee := r.leadTransferee
-
-	if lastleadtransferee != None {
-		if lastleadtransferee == leadTransferee {
+	if r.leadTransferee != None {
+		if r.leadTransferee == leadTransferee {
 			return
 		}
 		if leadTransferee == r.id {
+			r.leadTransferee = None
 			r.Term += 1
 		}
 		r.abortLeadTransfer()
@@ -589,20 +587,18 @@ func (r *Raft) handleTransfer(m pb.Message) {
 
 	r.leadTransferee = leadTransferee
 
-	if _, ok := r.Prs[leadTransferee]; !ok {
-		log.Errorf("raft %v not in cluster", leadTransferee)
-		return
-	}
 	if r.Prs[leadTransferee].Match == r.RaftLog.LastIndex() {
+		log.Infof("[T%v] %v:R%v send msgTimeout to %v", r.Term, r.State, r.id, r.leadTransferee)
 		msg := pb.Message{
 			From:    r.id,
 			To:      r.leadTransferee,
 			MsgType: pb.MessageType_MsgTimeoutNow,
 		}
-		log.Infof("[T%v] %v:R%v send msgTimeout to %v", r.Term, r.State, r.id, msg.To)
 		r.msgs = append(r.msgs, msg)
 	} else {
-		log.Infof("[T%v] %v:R%v target %v not-up-to-date", r.Term, r.State, r.id, m.To)
+		log.Infof("[T%v] %v:R%v transfer target %v not-up-to-date, match:%v, lastIndex:%v",
+			r.Term, r.State, r.id, r.Prs[leadTransferee].Match, leadTransferee, r.RaftLog.LastIndex())
+		// r.leadTransferee = None
 		r.sendAppend(r.leadTransferee)
 	}
 

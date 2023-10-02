@@ -52,6 +52,8 @@ func (r *splitCheckHandler) Handle(t worker.Task) {
 			// To make sure the keys of same user key locate in one Region, decode and then encode to truncate the timestamp
 			key = codec.EncodeBytes(userKey)
 		}
+		// log.Errorf("send splitRegion msg to region %v, split key: %s, [start:%s, end:%s), version %v",
+		// 	regionId, key, region.StartKey, region.EndKey, region.GetRegionEpoch().Version)
 		msg := message.Msg{
 			Type:     message.MsgTypeSplitRegion,
 			RegionID: regionId,
@@ -73,13 +75,14 @@ func (r *splitCheckHandler) Handle(t worker.Task) {
 func (r *splitCheckHandler) splitCheck(regionID uint64, startKey, endKey []byte) []byte {
 	txn := r.engine.NewTransaction(false)
 	defer txn.Discard()
-
+	// nthItem := 0
 	r.checker.reset()
 	it := engine_util.NewCFIterator(engine_util.CfDefault, txn)
 	defer it.Close()
 	for it.Seek(startKey); it.Valid(); it.Next() {
 		item := it.Item()
 		key := item.Key()
+		// nthItem += 1
 		if engine_util.ExceedEndKey(key, endKey) {
 			// update region size
 			r.router.Send(regionID, message.Msg{
@@ -89,6 +92,8 @@ func (r *splitCheckHandler) splitCheck(regionID uint64, startKey, endKey []byte)
 			break
 		}
 		if r.checker.onKv(key, item) {
+			// log.Errorf("%v th entry generate split key %s, key %s\n[start:%s, end:%s), maxsize %v, splitsize %v, cursize %v",
+			// 	nthItem, r.checker.splitKey, key, startKey, endKey, r.checker.maxSize, r.checker.splitSize, r.checker.currentSize)
 			break
 		}
 	}

@@ -27,6 +27,7 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 		r.becomeFollower(m.Term, m.From)
 	}
 
+	// clear raft logs
 	if lastIncludeIndex >= r.RaftLog.LastIndex() {
 		r.RaftLog.entries = make([]pb.Entry, 1)
 		r.RaftLog.firstIndex = lastIncludeIndex
@@ -89,8 +90,8 @@ func (r *Raft) sendSnapShotTo(to uint64) bool {
 		// next heart beat will send again
 		return false
 	}
-	log.Warnf("[T%v] %v:R%v send snapshot <lastInclude: %v> to R%v, applied %v ",
-		r.Term, r.State, r.id, snapshot.Metadata.Index, to, r.RaftLog.applied)
+	log.Warnf("[T%v] %v:R%v send snapshot <lastInclude: %v> to R%v, applied %v, first %v ",
+		r.Term, r.State, r.id, snapshot.Metadata.Index, to, r.RaftLog.applied, r.RaftLog.FirstIndex())
 
 	snapMsg := pb.Message{
 		MsgType:  pb.MessageType_MsgSnapshot,

@@ -350,11 +350,13 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	}
 
 	// clear stale raft state, apply state
-	if err := ps.clearMeta(kvWB, raftWB); err != nil {
-		log.Errorf("clear meta err: %v", err)
+	if ps.isInitialized() {
+		if err := ps.clearMeta(kvWB, raftWB); err != nil {
+			log.Errorf("clear meta err: %v", err)
+		}
+		// clear stale kv entry
+		ps.clearExtraData(snapData.Region)
 	}
-	// clear stale kv entry
-	ps.clearExtraData(snapData.Region)
 
 	// clearMeta cleat the region state, so must write regionstate
 	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)

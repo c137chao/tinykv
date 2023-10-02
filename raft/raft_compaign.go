@@ -1,13 +1,18 @@
 package raft
 
 import (
-	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
+func (r *Raft) handleMsgHup() {
+	if _, ok := r.Prs[r.id]; ok {
+		r.becomeCandidate()
+		r.sendRequestVoteAll()
+	}
+}
+
 // send request vote to all peers
 func (r *Raft) sendRequestVoteAll() {
-	log.Warnf("[T%v] R%v request votes to %v", r.Term, r.id, len(r.Prs))
 	if len(r.Prs) == 1 {
 		// only one node
 		r.becomeLeader()

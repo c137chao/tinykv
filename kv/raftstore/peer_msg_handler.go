@@ -53,7 +53,6 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 		d.onTick()
 	case message.MsgTypeSplitRegion:
 		split := msg.Data.(*message.MsgSplitRegion)
-		log.Infof("%s on split with %v", d.Tag, split.SplitKey)
 		d.onPrepareSplitRegion(split.RegionEpoch, split.SplitKey, split.Callback)
 	case message.MsgTypeRegionApproximateSize:
 		d.onApproximateRegionSize(msg.Data.(uint64))
@@ -111,32 +110,25 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	// Your Code Here (2B).
 	// now this peer must be leader
 	if msg.AdminRequest != nil {
-		d.proposeAdminReq(msg, cb)
-
+		d.proposeAdmiMsg(msg, cb)
 	} else {
-		proposal := &proposal{
-			index: d.nextProposalIndex(),
-			term:  d.Term(),
-			cb:    cb,
-		}
-		d.proposals = append(d.proposals, proposal)
-
-		raftcmd, err := msg.Marshal()
-		if err != nil {
-			log.Fatalf("propose raft cmd err: %v\n", err)
-		}
-		d.RaftGroup.Propose(raftcmd)
+		d.proposeRaftMsg(msg, cb)
 	}
 
 }
 
-func (d *peerMsgHandler) proposeAdminReq(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+// propose admin request:
+// admin request include compactlog, transferleader, changepeer and split region.
+// transfer leader will only send a msgTimeout to target or sendappend if target is not uptodate,
+// change peer will package to a normal entry to raft,
+// just compact log and split region will apply as special admin request.
+func (d *peerMsgHandler) proposeAdmiMsg(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	admin := msg.AdminRequest
 
 	switch msg.AdminRequest.CmdType {
 	case raft_cmdpb.AdminCmdType_CompactLog:
 		// just seen a normal raft msg
-		log.Infof("[T%v] Peer %v recv CompactLog at %v", d.Term(), d.PeerId(), admin.CompactLog.CompactIndex)
+		// log.Infof("[T%v] Peer %v recv CompactLog at %v", d.Term(), d.PeerId(), admin.CompactLog.CompactIndex)
 		admincmd, err := msg.Marshal()
 		if err != nil {
 			log.Fatalf("marshal error")
@@ -154,8 +146,56 @@ func (d *peerMsgHandler) proposeAdminReq(msg *raft_cmdpb.RaftCmdRequest, cb *mes
 
 	case raft_cmdpb.AdminCmdType_ChangePeer:
 		if d.peerStorage.AppliedIndex() < d.RaftGroup.Raft.PendingConfIndex {
-			log.Warnf("last pendingConf doesn't applied")
+			log.Warnf("pending change peers applied %v and pending %v", d.peerStorage.AppliedIndex(), d.RaftGroup.Raft.PendingConfIndex)
 			return
+		}
+		changePeer := msg.AdminRequest.ChangePeer
+
+		// if there are only two peers and remove leader
+		// when leader receive confchange entry response and apply
+		// leader crash now and follower dosen't recv commit msg for confchange entry
+		// follower always think there is an other raft node in region and never recv its msg
+		// so leader should complete leader transfer before remove itself
+		if len(d.Region().Peers) == 2 &&
+			changePeer.ChangeType == eraftpb.ConfChangeType_RemoveNode &&
+			changePeer.Peer.Id == d.PeerId() {
+
+			other := d.Region().Peers[0].Id
+			if other == d.PeerId() {
+				other = d.Region().Peers[1].Id
+			}
+			d.RaftGroup.TransferLeader(other)
+			return
+		}
+
+		proposal := &proposal{
+			index: d.nextProposalIndex(),
+			term:  d.Term(),
+			cb:    cb,
+		}
+		d.proposals = append(d.proposals, proposal)
+		log.Warnf("Peer %v recv change peer %v, idx:%v, pending Conf:%v", d.PeerId(), admin.ChangePeer, proposal.index, proposal.index)
+
+		ctx, err := changePeer.Marshal()
+		if err != nil {
+			panic("marshall error")
+		}
+		cc := eraftpb.ConfChange{
+			ChangeType: changePeer.ChangeType,
+			NodeId:     changePeer.Peer.Id,
+			Context:    ctx, // TODO: fill context
+		}
+		if err := d.RaftGroup.ProposeConfChange(cc); err == nil {
+			// pending other change peer msg
+			d.RaftGroup.Raft.PendingConfIndex = proposal.index
+		}
+
+	case raft_cmdpb.AdminCmdType_Split:
+		// split will also pending conf change or other split cmd
+		// it will be filter at split tick check
+		data, err := msg.Marshal()
+		if err != nil {
+			panic("marshall error")
 		}
 		proposal := &proposal{
 			index: d.nextProposalIndex(),
@@ -163,27 +203,33 @@ func (d *peerMsgHandler) proposeAdminReq(msg *raft_cmdpb.RaftCmdRequest, cb *mes
 			cb:    cb,
 		}
 		d.proposals = append(d.proposals, proposal)
+		d.RaftGroup.Raft.PendingConfIndex = proposal.index
 
-		log.Warnf("Peer %v recv change peer %v, propose idx: %v", d.PeerId(), admin.ChangePeer, proposal.index)
-		ctx, err := msg.AdminRequest.ChangePeer.Marshal()
-		if err != nil {
-			panic("marshall error")
-		}
-		cc := eraftpb.ConfChange{
-			ChangeType: admin.ChangePeer.ChangeType,
-			NodeId:     admin.ChangePeer.Peer.Id,
-			Context:    ctx, // TODO: fill context
-		}
-		if err := d.RaftGroup.ProposeConfChange(cc); err != nil {
-			d.RaftGroup.Raft.PendingConfIndex = proposal.index
-		}
+		log.Warnf("%v recv split with key %s on [start:%s, end:%s) version: %v, entry idx %v",
+			d.Tag, admin.Split.SplitKey, d.Region().StartKey, d.Region().EndKey,
+			msg.Header.RegionEpoch.Version, proposal.index)
 
-	case raft_cmdpb.AdminCmdType_Split:
-		log.Fatalf("Peer %v request split %v", d.PeerId(), admin.Split)
+		d.RaftGroup.Propose(data)
 
 	default:
 		log.Fatalf("Unimplement adminRequest %v", msg.AdminRequest.CmdType)
 	}
+}
+
+func (d *peerMsgHandler) proposeRaftMsg(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	proposal := &proposal{
+		index: d.nextProposalIndex(),
+		term:  d.Term(),
+		cb:    cb,
+	}
+	d.proposals = append(d.proposals, proposal)
+
+	raftcmd, err := msg.Marshal()
+	if err != nil {
+		panic(err)
+	}
+
+	d.RaftGroup.Propose(raftcmd)
 }
 
 func (d *peerMsgHandler) onTick() {
@@ -465,6 +511,7 @@ func (d *peerMsgHandler) destroyPeer() {
 	delete(meta.regions, regionID)
 }
 
+// find the first region greate than d.Region()
 func (d *peerMsgHandler) findSiblingRegion() (result *metapb.Region) {
 	meta := d.ctx.storeMeta
 	meta.RLock()
@@ -524,12 +571,20 @@ func (d *peerMsgHandler) onSplitRegionCheckTick() {
 	if d.ApproximateSize != nil && d.SizeDiffHint < d.ctx.cfg.RegionSplitSize/8 {
 		return
 	}
+
+	if d.peerStorage.AppliedIndex() < d.RaftGroup.Raft.PendingConfIndex {
+		// log.Warnf("region %v split-pending, applied %v and pending %v", d.Region().Id, d.peerStorage.AppliedIndex(), d.RaftGroup.Raft.PendingConfIndex)
+		return
+	}
+
 	d.ctx.splitCheckTaskSender <- &runner.SplitCheckTask{
 		Region: d.Region(),
 	}
 	d.SizeDiffHint = 0
 }
 
+// ask client scheduler for split new region id and peer id
+// after generate new id, scheduler will send a admin message for split to peer msg handler
 func (d *peerMsgHandler) onPrepareSplitRegion(regionEpoch *metapb.RegionEpoch, splitKey []byte, cb *message.Callback) {
 	if err := d.validateSplitRegion(regionEpoch, splitKey); err != nil {
 		cb.Done(ErrResp(err))
@@ -577,6 +632,9 @@ func (d *peerMsgHandler) validateSplitRegion(epoch *metapb.RegionEpoch, splitKey
 	return nil
 }
 
+// update the region size,
+// this message is sended by split_checker/splitCheck
+// if splitCheck scan all item in region and total size doesn't arrive split size
 func (d *peerMsgHandler) onApproximateRegionSize(size uint64) {
 	d.ApproximateSize = &size
 }

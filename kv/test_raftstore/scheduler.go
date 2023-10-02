@@ -302,6 +302,7 @@ func (m *MockSchedulerClient) RegionHeartbeat(req *schedulerpb.RegionHeartbeatRe
 //	if region range change, add new region or split region
 func (m *MockSchedulerClient) handleHeartbeatVersion(region *metapb.Region) error {
 	if engine_util.ExceedEndKey(region.GetStartKey(), region.GetEndKey()) {
+		log.Fatalf("region %v: start key:%s, end key:%s", region.Id, region.StartKey, region.EndKey)
 		panic("start key > end key")
 	}
 

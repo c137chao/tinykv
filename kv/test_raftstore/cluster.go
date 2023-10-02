@@ -299,6 +299,7 @@ func (c *Cluster) GetStoreIdsOfRegion(regionID uint64) []uint64 {
 
 func (c *Cluster) MustPut(key, value []byte) {
 	c.MustPutCF(engine_util.CfDefault, key, value)
+	// log.Infof("Put key:%s, value:%s", key, value)
 }
 
 func (c *Cluster) MustPutCF(cf string, key, value []byte) {
