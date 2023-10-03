@@ -14,6 +14,9 @@
 package schedulers
 
 import (
+	"sort"
+
+	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/core"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule/operator"
@@ -76,7 +79,120 @@ func (s *balanceRegionScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
 }
 
 func (s *balanceRegionScheduler) Schedule(cluster opt.Cluster) *operator.Operator {
-	// Your Code Here (3C).
+	// Your Code Here
+	allStores := cluster.GetStores()
+	stores := make([]*core.StoreInfo, 0)
+
+	// a suitable store should be up and the down time cannot be longer than MaxStoreDownTime
+	maxDownTime := cluster.GetMaxStoreDownTime()
+	for _, store := range allStores {
+		if store.IsUp() && store.DownTime() <= maxDownTime {
+			stores = append(stores, store)
+		}
+	}
+
+	// if #stores less than 2, can't move
+	if len(stores) < 2 {
+		return nil
+	}
+
+	// sort stores by regionSize decrease
+	sort.Slice(stores, func(i, j int) bool {
+		return stores[i].GetRegionSize() > stores[j].GetRegionSize()
+	})
+
+	// select one region on some store, select store region size should be as much as possible
+	fromIdx, moveRegion := getMoveFromStore(cluster, stores)
+	if moveRegion == nil {
+		return nil
+	}
+
+	// according test, if peer count of one region less than maxReplicas, don't remove
+	// or try other region ??
+	regionStores := moveRegion.GetStoreIds()
+	if len(regionStores) < cluster.GetMaxReplicas() {
+		return nil
+	}
+
+	// move to storeid should be one store which no any peer on it which in move from region
+	toIdxOff := getMoveToStore(cluster, stores[fromIdx+1:], regionStores)
+	if toIdxOff == -1 {
+		return nil
+	}
+
+	fromStore := stores[fromIdx]
+	toStore := stores[fromIdx+1+toIdxOff]
+
+	log.Infof("source store %v, size: %v, target store %v, size: %v",
+		fromStore.GetID(), fromStore.GetRegionSize(), toStore.GetID(), toStore.GetRegionSize())
+
+	diffSize := fromStore.GetRegionSize() - toStore.GetRegionSize()
+
+	if diffSize < 2*moveRegion.GetApproximateSize() {
+		return nil
+	}
+
+	// create a peer on move to store, it will replace move from peer later
+	newPeer, err := cluster.AllocPeer(toStore.GetID())
+	if err != nil {
+		return nil
+	}
+
+	if moveOp, err := operator.CreateMovePeerOperator(
+		"balance-region-describe: balabala",
+		cluster,
+		moveRegion,
+		operator.OpBalance,
+		fromStore.GetID(),
+		toStore.GetID(),
+		newPeer.Id,
+	); err == nil {
+		return moveOp
+	}
 
 	return nil
+
+}
+
+// find the store meet the condition in lab doc which has max regionsize
+// in one store, priority level: pending region > follower > leader
+// if peers pn one store don't meet any condition above, ignore it and fine next one
+func getMoveFromStore(cluster opt.Cluster, stores []*core.StoreInfo) (int, *core.RegionInfo) {
+	var regionInfo *core.RegionInfo
+	for i, store := range stores {
+		// First it will try to select a pending region because pending may mean the disk is overloaded.
+		cluster.GetPendingRegionsWithLock(store.GetID(), func(region core.RegionsContainer) {
+			regionInfo = region.RandomRegion(nil, nil)
+		})
+		if regionInfo != nil {
+			return i, regionInfo
+		}
+
+		// If there isn’t a pending region, it will try to find a follower region.
+		cluster.GetFollowersWithLock(store.GetID(), func(region core.RegionsContainer) {
+			regionInfo = region.RandomRegion(nil, nil)
+		})
+		if regionInfo != nil {
+			return i, regionInfo
+		}
+
+		// If it still cannot pick out one region, it will try to pick leader regions.
+		cluster.GetLeadersWithLock(store.GetID(), func(region core.RegionsContainer) {
+			regionInfo = region.RandomRegion(nil, nil)
+		})
+		if regionInfo != nil {
+			return i, regionInfo
+		}
+
+	}
+	return -1, nil
+}
+
+func getMoveToStore(cluster opt.Cluster, stores []*core.StoreInfo, excludeStores map[uint64]struct{}) int {
+	for i := len(stores) - 1; i >= 0; i-- {
+		if _, ok := excludeStores[stores[i].GetID()]; !ok {
+			return i
+		}
+	}
+	return -1
 }
