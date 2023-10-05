@@ -596,9 +596,9 @@ func (r *Raft) handleLeadTransfer(m pb.Message) {
 		}
 		r.msgs = append(r.msgs, msg)
 	} else {
+		// r.leadTransferee = None
 		log.Infof("[T%v] %v:R%v transfer target %v not-up-to-date, match:%v, lastIndex:%v",
 			r.Term, r.State, r.id, r.Prs[leadTransferee].Match, leadTransferee, r.RaftLog.LastIndex())
-		// r.leadTransferee = None
 		r.sendAppend(r.leadTransferee)
 	}
 

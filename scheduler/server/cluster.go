@@ -295,6 +295,7 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	}
 
 	if localRegion == nil {
+		// find all region intersecting [start key, end key), limit = -1 means no limit
 		overlapRegions := c.ScanRegions(region.GetStartKey(), region.GetEndKey(), -1)
 
 		for _, overlapRegion := range overlapRegions {
@@ -310,10 +311,21 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	}
 
 	for storeId := range region.GetStoreIds() {
-		c.updateStoreStatusLocked(storeId)
+		c.updateStore(storeId)
 	}
 
 	return nil
+}
+
+func (c *RaftCluster) updateStore(id uint64) {
+	// TODO: filter store needn't update
+	// If the new one’s version or conf_ver is greater than the original one, it cannot be skipped
+	// If the leader changed, it cannot be skipped
+	// If the new one or original one has pending peer, it cannot be skipped
+	// If the ApproximateSize changed, it cannot be skipped
+	// ...
+
+	c.updateStoreStatusLocked(id)
 }
 
 func (c *RaftCluster) updateStoreStatusLocked(id uint64) {
