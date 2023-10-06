@@ -3,7 +3,6 @@ package mvcc
 import (
 	"bytes"
 	"encoding/binary"
-	"math"
 
 	"github.com/pingcap-incubator/tinykv/kv/storage"
 	"github.com/pingcap-incubator/tinykv/kv/util/codec"
@@ -161,7 +160,7 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 	iter := txn.Reader.IterCF(engine_util.CfWrite)
 	defer iter.Close()
 
-	iter.Seek(EncodeKey(key, math.MaxUint64))
+	iter.Seek(EncodeKey(key, TsMax))
 
 	// find the write which writeTS equal txn.startTS
 	for ; iter.Valid(); iter.Next() {
@@ -196,9 +195,11 @@ func (txn *MvccTxn) MostRecentWrite(key []byte) (*Write, uint64, error) {
 	iter := txn.Reader.IterCF(engine_util.CfWrite)
 	defer iter.Close()
 
-	return lastWriteBefore(iter, key, math.MaxUint64)
+	return lastWriteBefore(iter, key, TsMax)
 }
 
+// find the last write record before timeStamp on key
+// return write, write commit ts, and error
 func lastWriteBefore(iter engine_util.DBIterator, key []byte, timeStamp uint64) (*Write, uint64, error) {
 	iter.Seek(EncodeKey(key, timeStamp))
 	if !iter.Valid() {
