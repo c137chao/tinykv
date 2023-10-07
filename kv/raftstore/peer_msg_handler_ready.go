@@ -216,21 +216,6 @@ func (d *peerMsgHandler) applySplitRegion(entry *eraftpb.Entry, req *raft_cmdpb.
 	region := d.Region()
 	split := req.AdminRequest.Split
 
-	// process stale split request
-
-	// if req.Header.RegionEpoch.Version != d.Region().RegionEpoch.Version {
-	// 	errEpochNotMatching := &util.ErrEpochNotMatch{}
-
-	// 	siblingRegion := d.findSiblingRegion()
-	// 	if siblingRegion != nil {
-	// 		errEpochNotMatching.Regions = append(errEpochNotMatching.Regions, siblingRegion)
-	// 	}
-	// 	d.peerStorage.applyState.AppliedIndex = entry.Index
-	// 	d.CallBackPropose(entry, ErrResp(errEpochNotMatching), false)
-
-	// 	return
-	// }
-
 	if err := util.CheckKeyInRegion(split.SplitKey, region); err != nil {
 		d.peerStorage.applyState.AppliedIndex = entry.Index
 		return
