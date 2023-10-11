@@ -118,6 +118,7 @@ func (d *peerMsgHandler) applyAdminReq(entry *eraftpb.Entry, reqs *raft_cmdpb.Ra
 	switch admin.CmdType {
 	case raft_cmdpb.AdminCmdType_CompactLog:
 		d.applyCompactLog(entry, admin.CompactLog)
+
 	case raft_cmdpb.AdminCmdType_Split:
 		d.applySplitRegion(entry, reqs)
 
@@ -177,11 +178,11 @@ func (d *peerMsgHandler) applyChangePeers(entry *eraftpb.Entry) {
 		if util.FindPeer(d.Region(), changePeers.Peer.StoreId) == nil {
 			d.Region().RegionEpoch.ConfVer += 1
 			d.Region().Peers = append(d.Region().Peers, changePeers.Peer)
-			// it's important to update peer cache
-			d.insertPeerCache(changePeers.Peer)
-
 			meta.WriteRegionState(wb, d.Region(), rspb.PeerState_Normal)
 			wb.MustWriteToDB(d.peerStorage.Engines.Kv)
+
+			// it's important to update peer cache
+			d.insertPeerCache(changePeers.Peer)
 		}
 
 	case eraftpb.ConfChangeType_RemoveNode:
@@ -191,10 +192,10 @@ func (d *peerMsgHandler) applyChangePeers(entry *eraftpb.Entry) {
 		}
 		if util.RemovePeer(d.Region(), changePeers.Peer.StoreId) != nil {
 			d.Region().RegionEpoch.ConfVer += 1
-			d.removePeerCache(changePeers.Peer.GetId())
-
 			meta.WriteRegionState(wb, d.Region(), rspb.PeerState_Normal)
 			wb.MustWriteToDB(d.peerStorage.Engines.Kv)
+
+			d.removePeerCache(changePeers.Peer.GetId())
 		}
 
 	default:
@@ -204,6 +205,7 @@ func (d *peerMsgHandler) applyChangePeers(entry *eraftpb.Entry) {
 
 	log.Infof("%v [APPLY] confChange:%v confV:%v, peers %v", d.Tag, changePeers, d.Region().RegionEpoch.ConfVer, d.Region().GetPeers())
 	d.peerStorage.applyState.AppliedIndex = entry.Index
+
 	d.CallBackPropose(entry, resp, false)
 }
 

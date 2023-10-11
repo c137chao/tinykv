@@ -131,12 +131,12 @@ func (d *peerMsgHandler) proposeAdmiMsg(msg *raft_cmdpb.RaftCmdRequest, cb *mess
 		// log.Infof("[T%v] Peer %v recv CompactLog at %v", d.Term(), d.PeerId(), admin.CompactLog.CompactIndex)
 		admincmd, err := msg.Marshal()
 		if err != nil {
-			log.Fatalf("marshal error")
+			panic("msg marshal error")
 		}
 		d.RaftGroup.Propose(admincmd)
 
 	case raft_cmdpb.AdminCmdType_TransferLeader:
-		log.Infof("[T%v] Peer %v recv TransferLeader", d.Term(), d.PeerId())
+		// log.Infof("[T%v] Peer %v recv TransferLeader", d.Term(), d.PeerId())
 		d.RaftGroup.TransferLeader(admin.TransferLeader.Peer.Id)
 		resp := newCmdResp()
 		resp.AdminResponse = &raft_cmdpb.AdminResponse{
@@ -173,12 +173,12 @@ func (d *peerMsgHandler) proposeAdmiMsg(msg *raft_cmdpb.RaftCmdRequest, cb *mess
 			term:  d.Term(),
 			cb:    cb,
 		}
-		d.proposals = append(d.proposals, proposal)
 		log.Warnf("Peer %v recv change peer %v, idx:%v, pending Conf:%v", d.PeerId(), admin.ChangePeer, proposal.index, proposal.index)
+		d.proposals = append(d.proposals, proposal)
 
 		ctx, err := changePeer.Marshal()
 		if err != nil {
-			panic("marshall error")
+			panic("msg marshall error")
 		}
 		cc := eraftpb.ConfChange{
 			ChangeType: changePeer.ChangeType,
@@ -195,7 +195,7 @@ func (d *peerMsgHandler) proposeAdmiMsg(msg *raft_cmdpb.RaftCmdRequest, cb *mess
 		// it will be filter at split tick check
 		data, err := msg.Marshal()
 		if err != nil {
-			panic("marshall error")
+			panic("msg marshall error")
 		}
 		proposal := &proposal{
 			index: d.nextProposalIndex(),

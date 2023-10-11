@@ -78,10 +78,10 @@ func (txn *MvccTxn) PutLock(key []byte, lock *Lock) {
 	// Your Code Here (4A).
 	// if lock on key is hold by other txn
 	// hwo to tell uplevel lock failed ?
-	getlock, err := txn.GetLock(key)
-	if err != nil || getlock != nil {
-		panic("TODO: handle case which lock has been hold by other txn")
-	}
+	// getlock, err := txn.GetLock(key)
+	// if err != nil || getlock != nil {
+	// 	panic("TODO: handle case which lock has been hold by other txn")
+	// }
 	modify := storage.Modify{
 		Data: storage.Put{
 			Key:   key,
@@ -108,10 +108,7 @@ func (txn *MvccTxn) DeleteLock(key []byte) {
 // I.e., the most recent value committed before the start of this transaction.
 func (txn *MvccTxn) GetValue(key []byte) ([]byte, error) {
 	// Your Code Here (4A).
-	iter := txn.Reader.IterCF(engine_util.CfWrite)
-	defer iter.Close()
-
-	lastWrite, _, err := lastWriteBefore(iter, key, txn.StartTS)
+	lastWrite, _, err := txn.lastWriteBefore(key, txn.StartTS)
 	if err != nil || lastWrite == nil {
 		return nil, err
 	}
@@ -165,17 +162,19 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 	// find the write which writeTS equal txn.startTS
 	for ; iter.Valid(); iter.Next() {
 		usrkey := DecodeUserKey(iter.Item().Key())
+		// if no such key
 		if !bytes.Equal(usrkey, key) {
 			return nil, 0, nil
 		}
-		iterval, err := iter.Item().Value()
+		value, err := iter.Item().Value()
 		if err != nil {
 			return nil, 0, err
 		}
-		write, err := ParseWrite(iterval)
+		write, err := ParseWrite(value)
 		if err != nil {
 			return nil, 0, err
 		}
+		// if write is commit by current txn, return
 		if write.StartTS == txn.StartTS {
 			return write, decodeTimestamp(iter.Item().Key()), nil
 		}
@@ -192,15 +191,15 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 // write's commit timestamp, or an error.
 func (txn *MvccTxn) MostRecentWrite(key []byte) (*Write, uint64, error) {
 	// Your Code Here (4A).
-	iter := txn.Reader.IterCF(engine_util.CfWrite)
-	defer iter.Close()
-
-	return lastWriteBefore(iter, key, TsMax)
+	return txn.lastWriteBefore(key, TsMax)
 }
 
 // find the last write record before timeStamp on key
 // return write, write commit ts, and error
-func lastWriteBefore(iter engine_util.DBIterator, key []byte, timeStamp uint64) (*Write, uint64, error) {
+func (txn *MvccTxn) lastWriteBefore(key []byte, timeStamp uint64) (*Write, uint64, error) {
+	iter := txn.Reader.IterCF(engine_util.CfWrite)
+	defer iter.Close()
+
 	iter.Seek(EncodeKey(key, timeStamp))
 	if !iter.Valid() {
 		return nil, 0, nil
